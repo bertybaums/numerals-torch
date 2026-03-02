@@ -66,14 +66,14 @@ cd "$SLURM_SUBMIT_DIR"
 # ─────────────────────────────────────────────────────────────────────────────
 
 python3 train.py \
-  --mode       sft \
+  --mode       rl \
   --scaffold   old \
+  --rl_version 1 \
   --model_size small \
-  --max_steps  80000 \
-  --batch_size 128 \
+  --max_steps  10000 \
   --lr         3e-4 \
   --max_len    64 \
-  --ckpt_in    checkpoints/pretrain_none_small_step64000.pt
+  --ckpt_in    checkpoints/sft_old_small_step80000.pt
 
 echo
 echo "Finished: $(date)"
