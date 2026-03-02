@@ -224,13 +224,15 @@ def make_dataset(scaffold, split='train', seed=42, digit_range=(1, 100)):
 
 def encode(s, max_len):
     """
-    Encode string s as [BOS] + chars + [EOS], left-padded to max_len with PAD.
+    Encode string s as [BOS] + chars + [EOS], right-padded to max_len with PAD.
+    Right-padding keeps BOS at position 0 so positional embeddings are consistent
+    between training and evaluation.
     Returns a list of token ids.
     """
     ids = [BOS_ID] + [tok2id[c] for c in s] + [EOS_ID]
     ids = ids[:max_len]
     pad_len = max_len - len(ids)
-    return [PAD_ID] * pad_len + ids
+    return ids + [PAD_ID] * pad_len
 
 def decode(ids):
     """Decode list of token ids to string, stripping BOS/EOS/PAD."""
@@ -242,11 +244,13 @@ def decode(ids):
     return ''.join(tokens)
 
 def encode_prompt(prompt_str, max_len):
-    """Encode a prompt string (no EOS) for generation, left-padded."""
+    """
+    Encode a prompt string (no EOS) for generation — no padding.
+    BOS is at position 0, matching training layout.
+    """
     ids = [BOS_ID] + [tok2id[c] for c in prompt_str]
     ids = ids[:max_len]
-    pad_len = max_len - len(ids)
-    return torch.tensor([PAD_ID] * pad_len + ids, dtype=torch.long)
+    return torch.tensor(ids, dtype=torch.long)
 
 
 # ── Collation ─────────────────────────────────────────────────────────────────
