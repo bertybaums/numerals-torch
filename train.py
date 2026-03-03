@@ -361,8 +361,10 @@ def train_rl(model, optimizer, scheduler, args, device, start_step):
         # Generate completion (stochastic)
         model.eval()
         with torch.no_grad():
+            # Cap new tokens so total sequence never exceeds block_size
+            max_new = max(1, args.max_len - prompt_len)
             gen_ids = model.generate(
-                prompt_ids, max_new_tokens=48,
+                prompt_ids, max_new_tokens=max_new,
                 temperature=args.temperature, greedy=False,
             )
         model.train()
