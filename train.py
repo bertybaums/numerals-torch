@@ -37,7 +37,21 @@ from data import (
     make_prompt, make_expression,
     extract_answer, extract_step_answer,
 )
+from data_abacus import (
+    ABACUS_VOCAB_SIZE, APAD_ID, AEOS_ID,
+    AbacusDataset, make_abacus_dataset,
+    aencode_prompt, adecode,
+    make_abacus_prompt, make_abacus_expression,
+    aextract_answer, is_valid_trace,
+)
 from model import build_model, get_device, count_params
+
+
+def is_abacus(scaffold):
+    return scaffold.startswith('abacus_')
+
+def abacus_variant(scaffold):
+    return scaffold.split('_')[1]  # 'abacus_A' → 'A'
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
@@ -46,7 +60,9 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--mode',       choices=['pretrain', 'sft', 'rl'], required=True)
     p.add_argument('--scaffold',   choices=['none', 'old', 'state_seq', 'decomp',
-                                             'carry_explicit', 'digit'], required=True)
+                                             'carry_explicit', 'digit',
+                                             'abacus_A', 'abacus_B', 'abacus_C', 'abacus_D'],
+                                   required=True)
     p.add_argument('--model_size', choices=['small', 'large'], default='small')
     p.add_argument('--max_steps',  type=int, default=80000)
     p.add_argument('--batch_size', type=int, default=128)
@@ -113,35 +129,48 @@ def inline_eval(model, args, device, n=100):
     step_correct = 0
     step_total   = 0
 
+    abacus = is_abacus(args.scaffold)
+    variant = abacus_variant(args.scaffold) if abacus else None
+
     for (A, B) in sample:
         C = A + B
         rA = random.choice([False, True])
         rB = random.choice([False, True])
-        prompt_str = make_prompt(A, B, args.scaffold, rA, rB)
-        try:
-            prompt_ids = encode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
-        except KeyError:
-            continue
 
-        gen = model.generate(prompt_ids, max_new_tokens=48, greedy=True)
-        completion = decode(gen[0].tolist())
+        if abacus:
+            prompt_str = make_abacus_prompt(A, B, variant, rA, rB)
+            try:
+                prompt_ids = aencode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
+            except KeyError:
+                continue
+            gen = model.generate(prompt_ids, max_new_tokens=min(64, args.max_len - prompt_ids.shape[1]), greedy=True)
+            completion = adecode(gen[0].tolist())
+            if aextract_answer(completion) == C:
+                correct += 1
+        else:
+            prompt_str = make_prompt(A, B, args.scaffold, rA, rB)
+            try:
+                prompt_ids = encode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
+            except KeyError:
+                continue
+            gen = model.generate(prompt_ids, max_new_tokens=48, greedy=True)
+            completion = decode(gen[0].tolist())
+            if extract_answer(completion) == C:
+                correct += 1
 
-        if extract_answer(completion) == C:
-            correct += 1
+            # Step accuracy for scaffolds that have an intermediate sum
+            if args.scaffold in ('state_seq', 'carry_explicit', 'decomp'):
+                B_tens = (B // 10) * 10
+                if args.scaffold == 'state_seq':
+                    expected_step = A + B_tens if B_tens > 0 else None
+                else:
+                    expected_step = None
 
-        # Step accuracy for scaffolds that have an intermediate sum
-        if args.scaffold in ('state_seq', 'carry_explicit', 'decomp'):
-            B_tens = (B // 10) * 10
-            if args.scaffold == 'state_seq':
-                expected_step = A + B_tens if B_tens > 0 else None
-            else:
-                expected_step = None  # checked in evaluate.py; skip here for speed
-
-            if expected_step is not None:
-                step_ans = extract_step_answer(completion)
-                step_total += 1
-                if step_ans == expected_step:
-                    step_correct += 1
+                if expected_step is not None:
+                    step_ans = extract_step_answer(completion)
+                    step_total += 1
+                    if step_ans == expected_step:
+                        step_correct += 1
 
     model.train()
     acc = correct / len(sample)
@@ -152,11 +181,18 @@ def inline_eval(model, args, device, n=100):
 # ── DataLoader helper ─────────────────────────────────────────────────────────
 
 def make_loader(args, split='train'):
-    dataset = ArithmeticDataset(
-        scaffold=args.scaffold,
-        split=split,
-        max_len=args.max_len,
-    )
+    if is_abacus(args.scaffold):
+        dataset = AbacusDataset(
+            variant=abacus_variant(args.scaffold),
+            split=split,
+            max_len=args.max_len,
+        )
+    else:
+        dataset = ArithmeticDataset(
+            scaffold=args.scaffold,
+            split=split,
+            max_len=args.max_len,
+        )
     num_workers = 0 if get_device().type == 'mps' else 2
     loader = DataLoader(
         dataset,
@@ -189,10 +225,12 @@ def train_supervised(model, optimizer, scheduler, args, device, start_step):
 
         x, y = x.to(device), y.to(device)
         logits = model(x)
+        vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
+        pad_id   = APAD_ID if is_abacus(args.scaffold) else PAD_ID
         loss   = F.cross_entropy(
-            logits.reshape(-1, VOCAB_SIZE),
+            logits.reshape(-1, vocab_sz),
             y.reshape(-1),
-            ignore_index=PAD_ID,
+            ignore_index=pad_id,
         )
         optimizer.zero_grad()
         loss.backward()
@@ -214,6 +252,13 @@ def train_supervised(model, optimizer, scheduler, args, device, start_step):
 # ── RL training ───────────────────────────────────────────────────────────────
 
 def compute_reward(completion_str, A, B, C, rl_version, scaffold):
+    if is_abacus(scaffold):
+        variant = abacus_variant(scaffold)
+        correct = is_valid_trace(completion_str, A, B, variant)
+        if rl_version == 1:
+            return 1.0 if correct else -1.0
+        return 1.0 if correct else 0.0
+
     answer = extract_answer(completion_str)
     correct = (answer == C)
 
@@ -244,11 +289,15 @@ def _check_operands(completion_str, A, B, scaffold):
 
 
 def compute_rl_loss(model, ref_model, gen_ids, prompt_len,
-                    reward, ema_baseline, sft_strings, args, device):
+                    reward, ema_baseline, sft_strings, args, device,
+                    pad_id=None, vocab_sz=None):
     """
     Compute the RL loss for the current completion.
     gen_ids: (1, T_total) — prompt + completion tokens
     """
+    pad_id   = pad_id   if pad_id   is not None else PAD_ID
+    vocab_sz = vocab_sz if vocab_sz is not None else VOCAB_SIZE
+
     comp_ids = gen_ids[:, prompt_len:]   # (1, T_comp)
     T_comp   = comp_ids.shape[1]
     if T_comp == 0:
@@ -262,7 +311,7 @@ def compute_rl_loss(model, ref_model, gen_ids, prompt_len,
     comp_log_probs = comp_log_probs.gather(
         2, comp_ids.unsqueeze(-1)).squeeze(-1)                     # (1, T_comp)
 
-    mask     = (comp_ids != PAD_ID).float()
+    mask     = (comp_ids != pad_id).float()
     mean_lp  = (comp_log_probs * mask).sum() / mask.sum().clamp(min=1)
 
     v = args.rl_version
@@ -310,15 +359,19 @@ def compute_rl_loss(model, ref_model, gen_ids, prompt_len,
         sft_loss = torch.tensor(0.0, device=device)
         if args.sft_mix_coef > 0.0 and sft_strings:
             sft_str = random.choice(sft_strings)
-            from data import collate_lm
-            x_sft, y_sft = collate_lm([sft_str], args.max_len)
+            if is_abacus(args.scaffold):
+                from data_abacus import acollate_lm
+                x_sft, y_sft = acollate_lm([sft_str], args.max_len)
+            else:
+                from data import collate_lm
+                x_sft, y_sft = collate_lm([sft_str], args.max_len)
             x_sft = x_sft.to(device)
             y_sft = y_sft.to(device)
             logits_sft = model(x_sft)
             sft_loss = F.cross_entropy(
-                logits_sft.reshape(-1, VOCAB_SIZE),
+                logits_sft.reshape(-1, vocab_sz),
                 y_sft.reshape(-1),
-                ignore_index=PAD_ID,
+                ignore_index=pad_id,
             )
 
         return policy_loss + args.kl_coef * kl_loss + args.sft_mix_coef * sft_loss
@@ -335,7 +388,14 @@ def train_rl(model, optimizer, scheduler, args, device, start_step):
             p.requires_grad_(False)
 
     train_facts = get_train_facts()
-    sft_strings = make_dataset(args.scaffold, split='train') if args.sft_mix_coef > 0 else []
+    abacus = is_abacus(args.scaffold)
+    variant = abacus_variant(args.scaffold) if abacus else None
+    pad_id   = APAD_ID   if abacus else PAD_ID
+    vocab_sz = ABACUS_VOCAB_SIZE if abacus else VOCAB_SIZE
+    if abacus:
+        sft_strings = make_abacus_dataset(variant, split='train') if args.sft_mix_coef > 0 else []
+    else:
+        sft_strings = make_dataset(args.scaffold, split='train') if args.sft_mix_coef > 0 else []
 
     ema_alpha    = 0.05
     ema_baseline = 0.0
@@ -350,12 +410,19 @@ def train_rl(model, optimizer, scheduler, args, device, start_step):
         C    = A + B
         rA   = random.choice([False, True])
         rB   = random.choice([False, True])
-        prompt_str = make_prompt(A, B, args.scaffold, rA, rB)
 
-        try:
-            prompt_ids = encode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
-        except KeyError:
-            continue
+        if abacus:
+            prompt_str = make_abacus_prompt(A, B, variant, rA, rB)
+            try:
+                prompt_ids = aencode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
+            except KeyError:
+                continue
+        else:
+            prompt_str = make_prompt(A, B, args.scaffold, rA, rB)
+            try:
+                prompt_ids = encode_prompt(prompt_str, args.max_len).unsqueeze(0).to(device)
+            except KeyError:
+                continue
         prompt_len = prompt_ids.shape[1]
 
         # Generate completion (stochastic)
@@ -369,13 +436,14 @@ def train_rl(model, optimizer, scheduler, args, device, start_step):
             )
         model.train()
 
-        completion = decode(gen_ids[0].tolist())
+        completion = adecode(gen_ids[0].tolist()) if abacus else decode(gen_ids[0].tolist())
         reward     = compute_reward(completion, A, B, C, args.rl_version, args.scaffold)
         ema_baseline = (1 - ema_alpha) * ema_baseline + ema_alpha * reward
 
         loss = compute_rl_loss(
             model, ref_model, gen_ids, prompt_len,
             reward, ema_baseline, sft_strings, args, device,
+            pad_id=pad_id, vocab_sz=vocab_sz,
         )
 
         optimizer.zero_grad()
@@ -429,10 +497,11 @@ def main():
     random.seed(args.seed)
     torch.manual_seed(args.seed)
 
-    model = build_model(args.model_size, args.max_len, VOCAB_SIZE).to(device)
+    vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
+    model = build_model(args.model_size, args.max_len, vocab_sz).to(device)
     print(f"\nMode: {args.mode}  |  Scaffold: {args.scaffold}"
           f"  |  Model: {args.model_size} ({count_params(model):,} params)"
-          f"  |  Device: {device}")
+          f"  |  Vocab: {vocab_sz}  |  Device: {device}")
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.LinearLR(

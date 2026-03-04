@@ -22,14 +22,28 @@ from data import (
     make_prompt, make_expression, extract_answer, extract_step_answer,
     from_roman,
 )
+from data_abacus import (
+    ABACUS_VOCAB_SIZE,
+    aencode_prompt, adecode,
+    make_abacus_prompt,
+    aextract_answer, aextract_final_state, is_valid_trace,
+)
 from model import build_model, get_device, count_params
+
+
+def is_abacus(scaffold):
+    return scaffold.startswith('abacus_')
+
+def abacus_variant(scaffold):
+    return scaffold.split('_')[1]
 
 
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt',       required=True)
     p.add_argument('--scaffold',   required=True,
-                   choices=['none', 'old', 'state_seq', 'decomp', 'carry_explicit', 'digit'])
+                   choices=['none', 'old', 'state_seq', 'decomp', 'carry_explicit', 'digit',
+                            'abacus_A', 'abacus_B', 'abacus_C', 'abacus_D'])
     p.add_argument('--model_size', choices=['small', 'large'], default='small')
     p.add_argument('--max_len',    type=int, default=64)
     p.add_argument('--seed',       type=int, default=42)
@@ -114,6 +128,47 @@ def evaluate(model, scaffold, test_facts, device, max_len):
                     step_correct += int(step_ans == expected_step)
 
     return counts, step_correct, step_total, carry_correct, carry_total
+
+
+@torch.no_grad()
+def evaluate_abacus(model, variant, test_facts, device, max_len):
+    """
+    Evaluate abacus scaffold variants.
+    Reports per-notation accuracy (valid grammar trace) and final-state accuracy.
+    """
+    model.eval()
+    counts       = defaultdict(lambda: {'correct': 0, 'total': 0})
+    state_correct = 0
+    state_total   = 0
+
+    for (A, B) in test_facts:
+        C = A + B
+        for rA in (False, True):
+            for rB in (False, True):
+                key = ('roman' if rA else 'hindu', 'roman' if rB else 'hindu')
+                prompt_str = make_abacus_prompt(A, B, variant, rA, rB)
+                try:
+                    prompt_ids = aencode_prompt(prompt_str, max_len).unsqueeze(0).to(device)
+                except KeyError:
+                    counts[key]['total'] += 1
+                    continue
+
+                max_new = max(1, max_len - prompt_ids.shape[1])
+                gen        = model.generate(prompt_ids, max_new_tokens=max_new, greedy=True)
+                completion = adecode(gen[0].tolist())
+
+                valid = is_valid_trace(completion, A, B, variant)
+                counts[key]['total']   += 1
+                counts[key]['correct'] += int(valid)
+
+                # Final state accuracy (independent of answer token)
+                final = aextract_final_state(completion)
+                state_total += 1
+                if final is not None:
+                    H, T, U = final
+                    state_correct += int(H * 100 + T * 10 + U == C)
+
+    return counts, state_correct, state_total
 
 
 @torch.no_grad()
@@ -204,26 +259,36 @@ def main():
     device = get_device()
     random.seed(args.seed)
 
-    model = build_model(args.model_size, args.max_len, VOCAB_SIZE).to(device)
+    vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
+    model = build_model(args.model_size, args.max_len, vocab_sz).to(device)
     ckpt  = torch.load(args.ckpt, map_location=device)
     model.load_state_dict(ckpt['model'])
     print(f"\nEvaluating: {args.ckpt}")
     print(f"Scaffold:   {args.scaffold}  |  Model: {args.model_size}"
-          f" ({count_params(model):,} params)  |  Device: {device}")
+          f" ({count_params(model):,} params)  |  Vocab: {vocab_sz}  |  Device: {device}")
+
+    test_facts = get_test_facts()
+
+    if is_abacus(args.scaffold):
+        variant = abacus_variant(args.scaffold)
+        counts, state_c, state_t = evaluate_abacus(
+            model, variant, test_facts, device, args.max_len
+        )
+        print_results(counts, state_c, state_t, 0, 0, args.scaffold)
+        if state_t > 0:
+            print(f"\n{'Final state accuracy':<22}  {state_c:>8}  {state_t:>7}  "
+                  f"{state_c / state_t:>9.1%}")
+        return
 
     if args.scaffold == 'digit':
         from data import make_dataset
-        # Use the same test split as training
         test_strings = make_dataset('digit', split='test')
-        # Reconstruct facts from strings
         import re
         test_facts = []
         for s in test_strings:
             m = re.match(r'^(\d+) \+ (\d+)', s)
             if m:
                 test_facts.append((int(m.group(1)), int(m.group(2))))
-    else:
-        test_facts = get_test_facts()
 
     counts, step_c, step_t, carry_c, carry_t = evaluate(
         model, args.scaffold, test_facts, device, args.max_len
