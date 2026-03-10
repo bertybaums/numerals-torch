@@ -1,6 +1,8 @@
-checkpoints/
-logs/
-__pycache__/
+**/checkpoints/
+**/logs/
+**/__pycache__/
 *.pyc
 *.pt
-data/
+**/data/
+*.pdf
+.claude/

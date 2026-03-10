@@ -28,7 +28,7 @@ from data_abacus import (
     make_abacus_prompt,
     aextract_answer, aextract_final_state, is_valid_trace,
 )
-from model import build_model, get_device, count_params
+from model import build_model, get_device, count_params, load_state_dict_compat
 
 
 def is_abacus(scaffold):
@@ -44,7 +44,7 @@ def parse_args():
     p.add_argument('--scaffold',   required=True,
                    choices=['none', 'old', 'state_seq', 'decomp', 'carry_explicit', 'digit',
                             'abacus_A', 'abacus_B', 'abacus_C', 'abacus_D'])
-    p.add_argument('--model_size', choices=['small', 'large'], default='small')
+    p.add_argument('--model_size', choices=['small', 'large', 'medium', 'xlarge'], default='small')
     p.add_argument('--max_len',    type=int, default=64)
     p.add_argument('--seed',       type=int, default=42)
     p.add_argument('--ood',        action='store_true',
@@ -262,7 +262,7 @@ def main():
     vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
     model = build_model(args.model_size, args.max_len, vocab_sz).to(device)
     ckpt  = torch.load(args.ckpt, map_location=device)
-    model.load_state_dict(ckpt['model'])
+    load_state_dict_compat(model, ckpt['model'])
     print(f"\nEvaluating: {args.ckpt}")
     print(f"Scaffold:   {args.scaffold}  |  Model: {args.model_size}"
           f" ({count_params(model):,} params)  |  Vocab: {vocab_sz}  |  Device: {device}")

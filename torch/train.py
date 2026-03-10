@@ -24,6 +24,7 @@ import copy
 import os
 import random
 import re
+from contextlib import nullcontext
 
 import torch
 import torch.nn.functional as F
@@ -44,7 +45,7 @@ from data_abacus import (
     make_abacus_prompt, make_abacus_expression,
     aextract_answer, is_valid_trace,
 )
-from model import build_model, get_device, count_params
+from model import build_model, get_device, count_params, load_state_dict_compat
 
 
 def is_abacus(scaffold):
@@ -63,7 +64,7 @@ def parse_args():
                                              'carry_explicit', 'digit',
                                              'abacus_A', 'abacus_B', 'abacus_C', 'abacus_D'],
                                    required=True)
-    p.add_argument('--model_size', choices=['small', 'large'], default='small')
+    p.add_argument('--model_size', choices=['small', 'large', 'medium', 'xlarge'], default='small')
     p.add_argument('--max_steps',  type=int, default=80000)
     p.add_argument('--batch_size', type=int, default=128)
     p.add_argument('--lr',         type=float, default=3e-4)
@@ -76,6 +77,7 @@ def parse_args():
     p.add_argument('--temperature', type=float, default=1.0)
     p.add_argument('--eval_every', type=int, default=1000)
     p.add_argument('--save_every', type=int, default=10000)
+    p.add_argument('--dropout',    type=float, default=0.0)
     p.add_argument('--seed',       type=int, default=42)
     return p.parse_args()
 
@@ -106,7 +108,7 @@ def save_checkpoint(model, optimizer, step, args):
 
 def load_checkpoint(path, model, optimizer, args, device):
     ckpt = torch.load(path, map_location=device)
-    model.load_state_dict(ckpt['model'])
+    load_state_dict_compat(model, ckpt['model'])
     start_step = 0
     # Full resume only if same mode; otherwise weights-only (new phase)
     if ckpt.get('mode') == args.mode:
@@ -207,7 +209,9 @@ def make_loader(args, split='train'):
 
 # ── Pretraining / SFT ─────────────────────────────────────────────────────────
 
-def train_supervised(model, optimizer, scheduler, args, device, start_step):
+def train_supervised(model, optimizer, scheduler, args, device, start_step, amp_ctx=None):
+    if amp_ctx is None:
+        amp_ctx = nullcontext()
     loader, dataset = make_loader(args, split='train')
     data_iter = iter(loader)
 
@@ -224,14 +228,15 @@ def train_supervised(model, optimizer, scheduler, args, device, start_step):
             x, y = next(data_iter)
 
         x, y = x.to(device), y.to(device)
-        logits = model(x)
-        vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
-        pad_id   = APAD_ID if is_abacus(args.scaffold) else PAD_ID
-        loss   = F.cross_entropy(
-            logits.reshape(-1, vocab_sz),
-            y.reshape(-1),
-            ignore_index=pad_id,
-        )
+        with amp_ctx:
+            logits = model(x)
+            vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
+            pad_id   = APAD_ID if is_abacus(args.scaffold) else PAD_ID
+            loss   = F.cross_entropy(
+                logits.reshape(-1, vocab_sz),
+                y.reshape(-1),
+                ignore_index=pad_id,
+            )
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -379,7 +384,7 @@ def compute_rl_loss(model, ref_model, gen_ids, prompt_len,
     raise ValueError(f"Unknown rl_version: {v}")
 
 
-def train_rl(model, optimizer, scheduler, args, device, start_step):
+def train_rl(model, optimizer, scheduler, args, device, start_step, amp_ctx=None):
     # Frozen reference model for v5
     ref_model = None
     if args.rl_version == 5:
@@ -498,10 +503,14 @@ def main():
     torch.manual_seed(args.seed)
 
     vocab_sz = ABACUS_VOCAB_SIZE if is_abacus(args.scaffold) else VOCAB_SIZE
-    model = build_model(args.model_size, args.max_len, vocab_sz).to(device)
+    model = build_model(args.model_size, args.max_len, vocab_sz, dropout=args.dropout).to(device)
     print(f"\nMode: {args.mode}  |  Scaffold: {args.scaffold}"
           f"  |  Model: {args.model_size} ({count_params(model):,} params)"
           f"  |  Vocab: {vocab_sz}  |  Device: {device}")
+
+    # Mixed precision on CUDA (bfloat16)
+    use_amp = device.type == 'cuda'
+    amp_ctx = torch.amp.autocast('cuda', dtype=torch.bfloat16) if use_amp else nullcontext()
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
     scheduler = torch.optim.lr_scheduler.LinearLR(
@@ -517,9 +526,9 @@ def main():
     os.makedirs('logs', exist_ok=True)
 
     if args.mode in ('pretrain', 'sft'):
-        train_supervised(model, optimizer, scheduler, args, device, start_step)
+        train_supervised(model, optimizer, scheduler, args, device, start_step, amp_ctx)
     elif args.mode == 'rl':
-        train_rl(model, optimizer, scheduler, args, device, start_step)
+        train_rl(model, optimizer, scheduler, args, device, start_step, amp_ctx)
 
     # Final save
     path = save_checkpoint(model, optimizer, args.max_steps, args)
