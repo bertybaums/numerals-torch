@@ -1,0 +1,129 @@
+"""
+Stateless abacus simulator for tool-use interaction.
+
+The model issues commands (+u5, +t3) and the simulator returns
+the resulting abacus state. This separates "knowing what to do"
+from "simulating the computation."
+
+Currently supports variant A (flag carry, overflow implicit).
+
+Usage:
+    sim = AbacusSimulator()
+    state = sim.reset(47)           # '[0|4|7]'
+    state = sim.step(state, '+u5')  # '[0|5|2]^'
+    state = sim.step(state, '+t3')  # '[0|8|2]'
+"""
+
+import re
+from data_abacus import _add_units, _add_tens, state as fmt_state
+
+
+class AbacusSimulator:
+    """Stateless abacus simulator for variant A (flag carry, overflow implicit)."""
+
+    def reset(self, A):
+        """Initialize abacus with operand A (0-999). Returns state string."""
+        return fmt_state(A // 100, (A // 10) % 10, A % 10)
+
+    def step(self, state_str, command_str):
+        """
+        Execute command on state.
+
+        Args:
+            state_str: '[H|T|U]'
+            command_str: '+u5', '+t3', etc.
+
+        Returns:
+            response: state string, optionally with '^' suffix for overflow
+        """
+        H, T, U = self.parse_state(state_str)
+        op, rod, n = self._parse_command(command_str)
+
+        if rod == 'u':
+            nH, nT, nU, overflow = _add_units(n, H, T, U)
+        elif rod == 't':
+            nH, nT, nU, overflow = _add_tens(n, H, T, U)
+        else:
+            raise ValueError(f"Unknown rod: {rod!r}")
+
+        result = fmt_state(nH, nT, nU)
+        if overflow:
+            result += '^'
+        return result
+
+    def parse_state(self, state_str):
+        """Parse '[H|T|U]' -> (H, T, U)."""
+        m = re.match(r'\[(\d)\|(\d)\|(\d)\]', state_str)
+        if not m:
+            raise ValueError(f"Invalid state: {state_str!r}")
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    def state_to_int(self, state_str):
+        """Convert '[H|T|U]' to integer."""
+        H, T, U = self.parse_state(state_str)
+        return H * 100 + T * 10 + U
+
+    def _parse_command(self, cmd):
+        """Parse '+u5' -> ('+', 'u', 5)."""
+        m = re.match(r'([+-])([ut])(\d)', cmd)
+        if not m:
+            raise ValueError(f"Invalid command: {cmd!r}")
+        return m.group(1), m.group(2), int(m.group(3))
+
+    def gold_trajectory(self, A, B):
+        """
+        Return the gold sequence of (command, response) pairs for A+B.
+
+        Decomposes B into units and tens digits. Only supports B in [0, 99]
+        since the command set has +u (units) and +t (tens) but no hundreds rod.
+        A can be up to 999 (loaded directly onto the abacus).
+
+        Returns:
+            list of dicts with keys 'command' and 'response'
+
+        Raises:
+            ValueError: if B > 99 (can't be decomposed into single-digit commands)
+        """
+        if B > 99:
+            raise ValueError(f"B={B} exceeds 99; can't decompose into +u/+t commands")
+
+        state = self.reset(A)
+        trajectory = [{'command': None, 'response': state}]  # initial state
+
+        b_u = B % 10
+        b_t = (B // 10) % 10
+
+        if b_u > 0:
+            cmd = f'+u{b_u}'
+            state = self.step(state.rstrip('^'), cmd)
+            trajectory.append({'command': cmd, 'response': state})
+
+        if b_t > 0:
+            cmd = f'+t{b_t}'
+            state = self.step(state.rstrip('^'), cmd)
+            trajectory.append({'command': cmd, 'response': state})
+
+        return trajectory
+
+
+if __name__ == '__main__':
+    sim = AbacusSimulator()
+    test_cases = [
+        (47, 35, 82),
+        (56, 67, 123),
+        (23, 41, 64),
+        (99, 99, 198),
+        (5, 3, 8),
+        (50, 30, 80),
+        (100, 50, 150),  # A=100: loads as [1|0|0]
+        (1, 99, 100),    # near-boundary
+    ]
+    for A, B, C in test_cases:
+        traj = sim.gold_trajectory(A, B)
+        final = sim.state_to_int(traj[-1]['response'].rstrip('^'))
+        status = 'ok' if final == C else 'FAIL'
+        steps = ' '.join(
+            f"{t['command']}>{t['response']}" if t['command'] else t['response']
+            for t in traj
+        )
+        print(f'{A:3d} + {B:3d} = {C:3d}  [{status}]  {steps}')

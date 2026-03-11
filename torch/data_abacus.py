@@ -52,8 +52,8 @@ def state(H, T, U):
     return f"[{H}|{T}|{U}]"
 
 def load_state(n):
-    """Initial state for operand n (1-99): hundreds=0."""
-    return state(0, n // 10, n % 10)
+    """Initial state for operand n (0-999)."""
+    return state(n // 100, (n // 10) % 10, n % 10)
 
 
 # ── Trace generators ──────────────────────────────────────────────────────────
@@ -100,11 +100,11 @@ def trace_A(A, B):
     Generate abacus trace for A + B, Variant A.
     Direct addition shown; overflow flagged with ^ suffix.
     """
-    H, T, U = 0, A // 10, A % 10
+    H, T, U = A // 100, (A // 10) % 10, A % 10
     steps = [state(H, T, U)]
 
     b_u = B % 10
-    b_t = B // 10
+    b_t = (B // 10) % 10
 
     if b_u > 0:
         nH, nT, nU, overflow = _add_units(b_u, H, T, U)
@@ -133,11 +133,11 @@ def trace_B(A, B):
     Direct addition shown; state after op already has carry absorbed.
     K token appended after any overflowing step.
     """
-    H, T, U = 0, A // 10, A % 10
+    H, T, U = A // 100, (A // 10) % 10, A % 10
     steps = [state(H, T, U)]
 
     b_u = B % 10
-    b_t = B // 10
+    b_t = (B // 10) % 10
 
     if b_u > 0:
         nH, nT, nU, overflow = _add_units(b_u, H, T, U)
@@ -167,11 +167,11 @@ def trace_C(A, B):
     Complement op: -u{10-n} or -t{10-n}, carry absorbed into state, flagged with ^.
     When no overflow, identical to A.
     """
-    H, T, U = 0, A // 10, A % 10
+    H, T, U = A // 100, (A // 10) % 10, A % 10
     steps = [state(H, T, U)]
 
     b_u = B % 10
-    b_t = B // 10
+    b_t = (B // 10) % 10
 
     if b_u > 0:
         nH, nT, nU, overflow = _add_units(b_u, H, T, U)
@@ -203,11 +203,11 @@ def trace_D(A, B):
     then K token, then post-carry state explicitly.
     When no overflow: identical to A/B/C.
     """
-    H, T, U = 0, A // 10, A % 10
+    H, T, U = A // 100, (A // 10) % 10, A % 10
     steps = [state(H, T, U)]
 
     b_u = B % 10
-    b_t = B // 10
+    b_t = (B // 10) % 10
 
     if b_u > 0:
         nH, nT, nU, overflow = _add_units(b_u, H, T, U)
