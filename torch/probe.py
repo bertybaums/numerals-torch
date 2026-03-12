@@ -207,13 +207,13 @@ class LinearProbe(nn.Module):
 PROBE_CONFIGS = {
     # name: (n_classes, task_type)
     # n_classes=1 for regression, >1 for classification
-    'A_value':   (100, 'regression'),   # 1-100
-    'B_value':   (100, 'regression'),   # 1-100
-    'A_tens':    (10,  'classification'),  # 0-9
+    'A_value':   (101, 'regression'),   # 1-100
+    'B_value':   (101, 'regression'),   # 1-100
+    'A_tens':    (11,  'classification'),  # 0-10 (10 when A=100)
     'A_units':   (10,  'classification'),  # 0-9
-    'B_tens':    (10,  'classification'),  # 0-9
+    'B_tens':    (11,  'classification'),  # 0-10 (10 when B=100)
     'B_units':   (10,  'classification'),  # 0-9
-    'sum_value': (200, 'regression'),   # 2-200
+    'sum_value': (201, 'regression'),   # 2-200
     'carry':     (2,   'classification'),  # 0 or 1
 }
 
