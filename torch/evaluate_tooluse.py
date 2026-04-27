@@ -217,7 +217,7 @@ def print_results(results):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt',       required=True)
-    p.add_argument('--model_size', choices=['small', 'large', 'medium', 'xlarge'], default='medium')
+    p.add_argument('--model_size', choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
     p.add_argument('--max_len',    type=int, default=80)
     p.add_argument('--seed',       type=int, default=42)
     return p.parse_args()

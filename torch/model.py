@@ -16,12 +16,14 @@ def get_device():
 
 # ── Model configs ─────────────────────────────────────────────────────────────
 
-SMALL_CFG  = dict(n_embd=16,  n_layer=4,  n_head=4)     # ~13K params
-LARGE_CFG  = dict(n_embd=32,  n_layer=4,  n_head=4)     # ~52K params
+TINY_CFG   = dict(n_embd=8,   n_layer=4,  n_head=2)     # ~4K params  (head_dim=4)
+SMALL_CFG  = dict(n_embd=16,  n_layer=4,  n_head=4)     # ~13K params (head_dim=4)
+LARGE_CFG  = dict(n_embd=32,  n_layer=4,  n_head=4)     # ~52K params (head_dim=8)
 MEDIUM_CFG = dict(n_embd=192, n_layer=8,  n_head=8)     # ~3.5M params
 XLARGE_CFG = dict(n_embd=384, n_layer=12, n_head=12)    # ~21M params
 
 MODEL_CONFIGS = {
+    'tiny':   TINY_CFG,
     'small':  SMALL_CFG,
     'large':  LARGE_CFG,
     'medium': MEDIUM_CFG,

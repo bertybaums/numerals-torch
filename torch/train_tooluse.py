@@ -85,19 +85,33 @@ def make_tooluse_expression(A, B, variant='A', roman_A=False, roman_B=False):
     return f"{fmt(A, roman_A)} + {fmt(B, roman_B)} : {trace_str} = {C}"
 
 
-def make_tooluse_dataset(split='train', variant='A', seed=42):
+_NOTATION_PAIRS = {
+    'all':   [(False, False), (False, True), (True, False), (True, True)],
+    'hindu': [(False, False)],
+    'roman': [(True, True)],
+}
+
+
+def make_tooluse_dataset(split='train', variant='A', seed=42, notation='all'):
     """
-    Generate tool-use training expressions for all notation combos.
+    Generate tool-use training expressions for the requested notation combos.
     Filters out B > 99 since the command set only has +u/+t (no hundreds rod).
+
+    notation:
+      'all'   — all 4 (rA, rB) combinations (default)
+      'hindu' — Hindu-Arabic only (no Roman parsing burden)
+      'roman' — Roman only (Roman parsing required for both operands)
     """
+    if notation not in _NOTATION_PAIRS:
+        raise ValueError(f"Unknown notation '{notation}', expected one of {list(_NOTATION_PAIRS)}")
+    pairs = _NOTATION_PAIRS[notation]
     facts = get_train_facts() if split == 'train' else get_test_facts()
     exprs = []
     for (A, B) in facts:
         if B > 99:
             continue  # can't decompose into single-digit +u/+t commands
-        for rA in (False, True):
-            for rB in (False, True):
-                exprs.append(make_tooluse_expression(A, B, variant, rA, rB))
+        for (rA, rB) in pairs:
+            exprs.append(make_tooluse_expression(A, B, variant, rA, rB))
     return exprs
 
 
@@ -183,9 +197,9 @@ def make_generation_mask(token_ids, vocab_map):
 class ToolUseDataset(torch.utils.data.Dataset):
     """Dataset that encodes tool-use sequences and provides generation masks."""
 
-    def __init__(self, split='train', variant='A', max_len=80, seed=42):
+    def __init__(self, split='train', variant='A', max_len=80, seed=42, notation='all'):
         self.max_len = max_len
-        self.strings = make_tooluse_dataset(split, variant, seed)
+        self.strings = make_tooluse_dataset(split, variant, seed, notation=notation)
         self.vocab_map = atok2id  # abacus vocab includes all needed tokens
         self.data = []
         for s in self.strings:
@@ -217,7 +231,8 @@ class ToolUseDataset(torch.utils.data.Dataset):
 
 def train_sft(model, args, device):
     """Supervised fine-tuning on gold tool-use trajectories."""
-    dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len)
+    dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len,
+                             notation=args.notation)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                         drop_last=True)
 
@@ -278,13 +293,13 @@ def train_sft(model, args, device):
                 print(f"  step {step:>7d}  loss={loss.item():.4f}")
 
             if step % args.save_every == 0:
-                path = f"checkpoints/tooluse_sft_{args.model_size}_step{step}.pt"
+                path = f"checkpoints/tooluse_sft_{args.ckpt_tag}_step{step}.pt"
                 torch.save({'model': model.state_dict(), 'step': step,
                             'args': vars(args)}, path)
                 print(f"  saved {path}")
 
     # Final save
-    path = f"checkpoints/tooluse_sft_{args.model_size}_step{step}.pt"
+    path = f"checkpoints/tooluse_sft_{args.ckpt_tag}_step{step}.pt"
     torch.save({'model': model.state_dict(), 'step': step,
                 'args': vars(args)}, path)
     print(f"  saved {path}")
@@ -417,7 +432,8 @@ def train_rl(model, args, device):
         p.requires_grad = False
 
     # SFT data for mixing (stabilization)
-    sft_dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len)
+    sft_dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len,
+                                 notation=args.notation)
     sft_loader = DataLoader(sft_dataset, batch_size=args.batch_size, shuffle=True,
                             drop_last=True)
     sft_iter = iter(sft_loader)
@@ -515,13 +531,13 @@ def train_rl(model, args, device):
             reward_count = 0
 
         if step % args.save_every == 0:
-            path = f"checkpoints/tooluse_rl_{args.model_size}_step{step}.pt"
+            path = f"checkpoints/tooluse_rl_{args.ckpt_tag}_step{step}.pt"
             torch.save({'model': model.state_dict(), 'step': step,
                         'args': vars(args)}, path)
             print(f"  saved {path}")
 
     # Final save
-    path = f"checkpoints/tooluse_rl_{args.model_size}_step{step}.pt"
+    path = f"checkpoints/tooluse_rl_{args.ckpt_tag}_step{step}.pt"
     torch.save({'model': model.state_dict(), 'step': step,
                 'args': vars(args)}, path)
     print(f"  saved {path}")
@@ -533,7 +549,9 @@ def train_rl(model, args, device):
 def parse_args():
     p = argparse.ArgumentParser(description='Tool-use training with abacus simulator')
     p.add_argument('--mode',         required=True, choices=['sft', 'rl'])
-    p.add_argument('--model_size',   choices=['small', 'large', 'medium', 'xlarge'], default='medium')
+    p.add_argument('--model_size',   choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
+    p.add_argument('--notation',     choices=['all', 'hindu', 'roman'], default='all',
+                   help="Training notation filter: 'all' = all 4 (rA,rB) combos, 'hindu' = Hindu-only, 'roman' = Roman-only")
     p.add_argument('--max_len',      type=int, default=80)
     p.add_argument('--batch_size',   type=int, default=64)
     p.add_argument('--lr',           type=float, default=3e-4)
@@ -545,13 +563,18 @@ def parse_args():
     p.add_argument('--save_every',   type=int, default=10000)
     p.add_argument('--seed',         type=int, default=42)
     p.add_argument('--ckpt_in',      default=None, help='Resume from checkpoint')
+    p.add_argument('--ckpt_tag',     default=None,
+                   help='Tag used in saved checkpoint filenames; defaults to model_size for backward compat')
     p.add_argument('--mask_loss',    action='store_true',
                    help='SFT: only train on model-generated tokens (not simulator output)')
     p.add_argument('--temperature',  type=float, default=1.0,
                    help='RL: sampling temperature for generation')
     p.add_argument('--sft_mix_coef', type=float, default=1.0,
                    help='RL: coefficient for SFT data mixing loss')
-    return p.parse_args()
+    args = p.parse_args()
+    if args.ckpt_tag is None:
+        args.ckpt_tag = args.model_size
+    return args
 
 
 def main():
