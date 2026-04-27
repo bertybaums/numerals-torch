@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "scope": "addition_1_to_99",
+  "comment": "Anchor problems for cross-run comparison. Each anchor is a numeric (A,B) pair; eval runs every anchor across all 4 notation pairs (hindu+hindu, hindu+roman, roman+hindu, roman+roman). Add to this set as new SPs surface new failure modes — do NOT remove or renumber existing entries (longitudinal comparability).",
+  "anchors": [
+    {"id": "trivial",                 "A": 1,  "B": 1,  "C": 2,   "category": "single_digit_no_carry"},
+    {"id": "smallest_carry",          "A": 9,  "B": 1,  "C": 10,  "category": "boundary_carry",         "note": "smallest sum that produces a carry"},
+    {"id": "single_carry_small",      "A": 7,  "B": 5,  "C": 12,  "category": "single_digit_with_carry"},
+    {"id": "no_carry_two_digit",      "A": 12, "B": 34, "C": 46,  "category": "two_digit_no_carry"},
+    {"id": "no_carry_distinct",       "A": 23, "B": 41, "C": 64,  "category": "two_digit_no_carry"},
+    {"id": "repeat_digits",           "A": 33, "B": 33, "C": 66,  "category": "two_digit_no_carry"},
+    {"id": "canonical",               "A": 47, "B": 35, "C": 82,  "category": "two_digit_units_carry",  "note": "canonical writeup example"},
+    {"id": "units_carry_small",       "A": 16, "B": 19, "C": 35,  "category": "two_digit_units_carry"},
+    {"id": "units_carry_mid",         "A": 28, "B": 45, "C": 73,  "category": "two_digit_units_carry"},
+    {"id": "tens_to_hundreds_exact",  "A": 70, "B": 30, "C": 100, "category": "tens_to_hundreds_exact"},
+    {"id": "halves",                  "A": 50, "B": 50, "C": 100, "category": "tens_to_hundreds_exact"},
+    {"id": "tens_carry_overflow",     "A": 60, "B": 50, "C": 110, "category": "tens_to_hundreds_carry"},
+    {"id": "double_carry_38_72",      "A": 38, "B": 72, "C": 110, "category": "double_carry",           "note": "tiny_all eval failure (2026-04-27)"},
+    {"id": "double_carry_42_79",      "A": 42, "B": 79, "C": 121, "category": "double_carry",           "note": "tiny_all novel-trajectory case"},
+    {"id": "double_carry_67_73",      "A": 67, "B": 73, "C": 140, "category": "double_carry",           "note": "tiny_all eval failure (2026-04-27)"},
+    {"id": "max_double_carry",        "A": 99, "B": 99, "C": 198, "category": "double_carry",           "note": "largest sum in 1..99 + 1..99"}
+  ]
+}

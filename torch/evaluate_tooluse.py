@@ -19,6 +19,8 @@ Usage:
 """
 
 import argparse
+import json
+import os
 import random
 import re
 from collections import defaultdict
@@ -144,6 +146,7 @@ def evaluate_interactive(model, test_facts, device, max_len):
                 'valid_commands': valid_commands,
                 'total_commands': total_commands,
                 'follows_gold': follows_gold,
+                'final_state': state_str,
                 'completion': completion,
             })
 
@@ -214,12 +217,68 @@ def print_results(results):
                   f"predicted={r['predicted']} cmds={r['commands']}")
 
 
+def classify(r):
+    """Coarse status / error category for examples-table grouping.
+
+    Categories are intentionally broad for SP1; the failure typology is expected
+    to crystallise once we have data from all SPs. Pre-SP4 codification per plan.
+    """
+    if r['correct']:
+        return 'correct'
+    if r['valid_commands'] < r['total_commands']:
+        return 'invalid_command'
+    if r['predicted'] == -1:
+        return 'no_answer'
+    # All commands valid, model produced an integer answer, but it's wrong
+    if r['follows_gold']:
+        return 'wrong_answer_on_gold_path'  # model executed gold cmds but emitted wrong number
+    if r['total_commands'] != len(r['gold_commands']):
+        return 'wrong_command_count'  # under- or over-shot the gold trajectory length
+    return 'wrong_digits'  # right shape, wrong digit picks
+
+
+def write_jsonl(results, path):
+    """Dump per-example results as JSONL, with classify() applied."""
+    os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+    with open(path, 'w') as f:
+        for r in results:
+            row = {
+                'A': r['A'],
+                'B': r['B'],
+                'C': r['C'],
+                'notation_A': r['notation'][0],
+                'notation_B': r['notation'][1],
+                'correct': r['correct'],
+                'status': classify(r),
+                'predicted': r['predicted'],
+                'commands': r['commands'],
+                'gold_commands': r['gold_commands'],
+                'valid_commands': r['valid_commands'],
+                'total_commands': r['total_commands'],
+                'follows_gold': r['follows_gold'],
+                'final_state': r['final_state'],
+                'completion': r['completion'],
+            }
+            f.write(json.dumps(row) + '\n')
+    print(f"Wrote per-example JSONL: {path}")
+
+
+def default_jsonl_path(ckpt_path):
+    """Derive logs/<ckpt-stem>_eval.jsonl from a checkpoint path."""
+    stem = os.path.splitext(os.path.basename(ckpt_path))[0]
+    return os.path.join('logs', f'{stem}_eval.jsonl')
+
+
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt',       required=True)
     p.add_argument('--model_size', choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
     p.add_argument('--max_len',    type=int, default=80)
     p.add_argument('--seed',       type=int, default=42)
+    p.add_argument('--jsonl_out',  default=None,
+                   help='Path for per-example JSONL dump. Defaults to logs/<ckpt-stem>_eval.jsonl')
+    p.add_argument('--no_jsonl',   action='store_true',
+                   help='Skip JSONL output entirely')
     return p.parse_args()
 
 
@@ -240,6 +299,10 @@ def main():
     test_facts = get_test_facts()
     results = evaluate_interactive(model, test_facts, device, args.max_len)
     print_results(results)
+
+    if not args.no_jsonl:
+        jsonl_path = args.jsonl_out or default_jsonl_path(args.ckpt)
+        write_jsonl(results, jsonl_path)
 
 
 if __name__ == '__main__':
