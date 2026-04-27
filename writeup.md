@@ -644,7 +644,55 @@ Similarly, B_units accuracy is highest for Hindu+Roman inputs (0.477) — the mo
 | SFT — carry-explicit, 80K (small) | `a_u+b_u=units [a_t+b_t[+carry]=tens] = C` | 79.4% |
 | SFT — carry-explicit, 160K (small) | Continued training | 92.1% |
 | SFT — digit-scaffold, 80K (small, 15K) | Right-to-left preamble + carry, 1-999 | 91.4% in-dist / 0% OOD |
-| **Tool-use SFT (medium, 3.5M)** | **Model issues commands to abacus simulator** | **100.0%** |
+| Tool-use SFT (medium, 3.5M) | Model issues commands to abacus simulator | 100.0% |
+| **Tool-use SFT (small, 14K)** | **Same protocol, 250× fewer params** | **100.0%** |
+
+---
+
+## Phase 9: The Capacity Floor for Tool Use (SP1)
+
+The tool-use result of Phase 7 — 100% accuracy with a 3.5M-parameter model — invited an obvious question. The model's job is not arithmetic; the simulator does the arithmetic. The model parses operands and emits a fixed-form command sequence (`+u<d> +t<d>`) that the simulator executes. That is a finite-state transduction — a regular-grammar-level task. **How much of the 3.5M parameters were actually doing useful work?**
+
+The framing predicts that the parsing of Roman numerals is the binding constraint — single-digit addition lives entirely in the simulator, so all the model has to learn is (i) decompose B into its tens/units digits and (ii) emit the corresponding command tokens. To test this, we trained models at three sizes — tiny (4K params, n_embd=8), small (14K, n_embd=16, the existing config), and large (53K, n_embd=32) — under two notation conditions: `notation=all` (all 4 combinations of Roman/Hindu for A and B, the original setup) and `notation=hindu` (Hindu-Arabic only, no Roman parsing burden). Six runs total, 80K SFT steps each.
+
+### Results
+
+| Model | Train | Overall | h+h | h+r | r+h | r+r |
+|-------|-------|--------:|----:|----:|----:|----:|
+| tiny (4K) | hindu | 25.6% | **97.1%** | 0.4% | 5.1% | 0.0% |
+| tiny (4K) | all | 17.1% | 27.5% | 12.3% | 18.5% | 10.3% |
+| **small (14K)** | **all** | **100.0%** | **100.0%** | **100.0%** | **100.0%** | **100.0%** |
+| small (14K) | hindu | 31.0% | 100.0% | 0.5% | 23.5% | 0.2% |
+| **large (53K)** | **all** | **100.0%** | **100.0%** | **100.0%** | **100.0%** | **100.0%** |
+| large (53K) | hindu | 31.2% | 100.0% | 1.6% | 23.0% | 0.3% |
+
+**The capacity floor for the full task is between 4K and 14K parameters.** Small (14K) is enough to drive the abacus and parse Roman numerals at the same time, with no errors anywhere on the held-out set. Large adds nothing measurable; medium (Phase 7) is 250× over-provisioned. The headline arc Roman+abacus → Hindu-Arabic notation that this project models historically corresponds to *less than 14,000 parameters of cognitive scaffolding* — a satisfyingly small number.
+
+### Tiny is parsing-bound, not sequencing-bound
+
+The tiny model's split tells the story cleanly. Trained Hindu-only, it reaches **97.1%** on hindu+hindu — meaning 4K parameters is enough to (a) read the digits of B from the prompt, (b) emit `+u<B%10> +t<B//10>`, and (c) read the final answer off the simulator's rod register. Sequencing the abacus protocol fits in 4K. What 4K cannot do is also handle Roman parsing: when forced to handle all 4 notation pairs, accuracy collapses to 17.1% across the board. Roman parsing is the binding constraint, exactly as the controller-as-finite-state-transducer framing predicts.
+
+### Spontaneous Roman-A delegation (the simulator does some parsing for free)
+
+A surprising secondary finding: both small and large models trained Hindu-only reach ~23% on roman+hindu at evaluation time, despite never having seen a Roman A in training. This is not an artifact. The tool-use trace structure passes the simulator's initial state `[0|H|U]` to the model in the prompt, which already encodes A's digits in positional form. So when A is in Roman numerals, the model can ignore A's surface form and read its decomposition directly from the simulator — partial delegation of parsing to the tool. The other ~77% misses on r+h presumably come from cases where the model still attends to the surface form of A and gets confused. Probing under SP6 should disambiguate.
+
+### Failure gallery surfaces an SP6 finding
+
+The error breakdown also exposes a pattern worth flagging early. Several `*_hindu` failures at all model sizes show **correct gold trajectories and correct simulator final states**, but wrong final answers. Examples (from `examples/SP1_capacity_floor.md`):
+
+```
+40+40=80 (h+h):  cmds=[+t4]      gold=[+t4]      state=[0|8|0]   predicted=8000
+17+4=21  (h+h):  cmds=[+u4]      gold=[+u4]      state=[0|2|1]^  predicted=2121
+50+59=109 (r+h): cmds=[+u9 +t5]  gold=[+u9 +t5]  state=[1|0|9]^  predicted=5
+16+48=64 (r+h):  cmds=[+u8 +t4]  gold=[+u8 +t4]  state=[0|6|4]   predicted=106  (small_hindu)
+67+73=140 (h+r): cmds=[(none)]                                    predicted=7777777
+```
+
+The model has executed the abacus protocol perfectly, the simulator has computed the right answer, and then the model — at the answer-readout step — produces a digit-repetition or related malformation rather than reading off the rod state. This says the answer head is **not** strictly conditioned on the simulator's final state in the way one might naively expect. It is sometimes pulling from elsewhere in the context — possibly the operands, possibly memorized priors, possibly the answer head's own bias toward token repetitions. This is exactly the question SP6's "implicit transition-function probe" is designed to test.
+
+### Implications
+
+The smallness number anchors the rest of the project: when SP4 introduces multiplication and a `times(d,e)` tool, the question becomes how much capacity that adds to the floor — keeping in mind that the floor for *addition with the abacus* is just 14K. The capability ladder of SP5 (tally → abacus → +shift → +times → RPN) becomes a curve plotting capacity against tool capability, with this Phase 9 result as the anchor point at the abacus rung.
 
 ---
 
