@@ -645,7 +645,8 @@ Similarly, B_units accuracy is highest for Hindu+Roman inputs (0.477) — the mo
 | SFT — carry-explicit, 160K (small) | Continued training | 92.1% |
 | SFT — digit-scaffold, 80K (small, 15K) | Right-to-left preamble + carry, 1-999 | 91.4% in-dist / 0% OOD |
 | Tool-use SFT (medium, 3.5M) | Model issues commands to abacus simulator | 100.0% |
-| **Tool-use SFT (small, 14K)** | **Same protocol, 250× fewer params** | **100.0%** |
+| Tool-use SFT (small, 14K) | Same protocol, 250× fewer params (SP1) | 100.0% |
+| **Tool-use SFT, compositional (small, 14K)** | **Commands re-tokenized as `+0d`/`+1d` (SP2a)** | **99.99%** |
 
 ---
 
@@ -693,6 +694,49 @@ The model has executed the abacus protocol perfectly, the simulator has computed
 ### Implications
 
 The smallness number anchors the rest of the project: when SP4 introduces multiplication and a `times(d,e)` tool, the question becomes how much capacity that adds to the floor — keeping in mind that the floor for *addition with the abacus* is just 14K. The capability ladder of SP5 (tally → abacus → +shift → +times → RPN) becomes a curve plotting capacity against tool capability, with this Phase 9 result as the anchor point at the abacus rung.
+
+---
+
+## Phase 10: Compositional Command Grammar (SP2a)
+
+The SP1 design used opaque rod letters in commands: `+u5` for "add 5 to the units rod," `+t3` for "add 3 to the tens rod." The letters `u` and `t` are categorical tokens — to extend the abacus to a hundreds rod under that scheme, we'd have to invent a new opaque token `+h` (and then `+th` for thousands, and so on). Each new rod is an out-of-vocabulary problem.
+
+The compositional alternative is structurally cleaner: encode the rod as its positional index, drawn from the existing digit vocabulary. So `+u5` becomes `+05` (rod 0 = units, value 5), `+t3` becomes `+13` (rod 1 = tens, value 3); a hundreds-rod command would be `+25`, a thousands-rod command `+35`. No new vocab tokens; the rod index is a digit the model has already seen in countless other contexts. This is the structural property that makes rod-index generalization (SP2b) possible at all.
+
+The SP2a question is the necessary precondition: **does compositional tokenization match opaque accuracy in-distribution?** If the answer is no, the whole SP2 program is dead.
+
+### Setup
+
+We re-trained tiny (4K) and small (14K) under both notation conditions (`all`, `hindu`) using compositional commands, otherwise identical to the SP1 pipeline (80K SFT steps, same data, same hyperparameters). Large was skipped — SP1 already showed it saturates at small.
+
+### Results
+
+| Model | Train | SP1 (opaque) | SP2a (compositional) | Δ |
+|-------|-------|-------------:|---------------------:|---:|
+| tiny (4K)  | hindu | 25.6% | 28.9% | +3.3 |
+| tiny (4K)  | all   | 17.1% |  9.6% | −7.5 |
+| **small (14K)** | **all**   | **100.0%** | **99.99%** | **−0.01** |
+| small (14K) | hindu | 31.0% | 29.2% | −1.8 |
+
+**The reference condition (small+all) matched almost perfectly: 100.0% → 99.99%, a single miss out of 7920 examples.** That single failure is the most concentrated example yet of the SP1 answer-head dissociation pattern:
+
+```
+8+1=9 (roman+hindu): cmds=[+01] gold=[+01] → state=[0|0|9] predicted=99
+```
+
+The model executed the right command, the simulator returned the right rod state, and the model emitted "99" instead of "9". One example in 7920 cleanly captures the same phenomenon SP1 saw across hundreds of cases — the answer head is not strictly conditioned on the rod state.
+
+### The interesting wrinkle: tiny+all dropped
+
+At the capacity floor, compositional tokenization had asymmetric effects. tiny+hindu *improved* slightly (h+h: 97.1% → 98.9%; r+h: 5.1% → **16.2%**, a 3× gain on Roman A parsing), but tiny+all *dropped* (17.1% → 9.6%) — and dropped roughly uniformly across all four notation pairs (10.3% / 9.5% / 9.5% / 8.9% in SP2a vs 27.5% / 12.3% / 18.5% / 10.3% in SP1).
+
+A plausible reading: with opaque tokens at the capacity floor, tiny+all could "specialize" — disproportionately learn one notation pair (h+h) at the expense of others. With compositional tokens, the same parameters are forced into a more uniform competition across notation pairs, ending up mediocre on all of them. Compositional tokenization thus appears to act like a mild regularizer when capacity is severely strained — helpful when the task is narrow (tiny+hindu), harmful when the task is broad and capacity is the bottleneck (tiny+all).
+
+This is a side observation, not a primary finding, but worth noting because it means **compositional tokenization is not strictly dominant** — it has a capacity-dependent character.
+
+### Implications for SP2b
+
+The headline finding is the one that matters: **compositional tokenization matches opaque at adequate capacity**. The rod-index generalization test (SP2b) can proceed using the small (14K) compositional checkpoint as its trained model. The next experiment: present that model with operands whose B values have a hundreds digit (B ∈ [100, 999]), and see whether it spontaneously emits `+2d` commands — a rod index it has never been trained to produce — using the simulator's response to evaluate correctness.
 
 ---
 
