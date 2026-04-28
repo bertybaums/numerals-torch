@@ -809,6 +809,65 @@ This also tightens what SP4 (multiplication via toolkit dispatch) needs to test.
 
 ---
 
+## Phase 12: Probing the Tool-Use Model (SP6)
+
+The SP1 and SP2 results converged on a striking pattern: the model sometimes emits a wrong final answer despite a correct simulator state, and sometimes the right answer despite a wrong state. Cases collected across the project so far:
+
+| Source | Example | Commands | State | Predicted |
+|---|---|---|---|---|
+| SP1 small_hindu | `40+40=80` | `[+t4]` (gold) | `[0\|8\|0]` | **8000** |
+| SP1 small_hindu | `17+4=21`  | `[+u4]` (gold) | `[0\|2\|1]^` | **2121** |
+| SP1 small_hindu | `50+59=109` | `[+u9 +t5]` (gold) | `[1\|0\|9]^` | **5** |
+| SP1 small_hindu | `16+48=64` | `[+u8 +t4]` (gold) | `[0\|6\|4]` | **106** |
+| SP2a small_all_COMP | `8+1=9` | `[+01]` (gold) | `[0\|0\|9]` | **99** |
+| SP2b tiny_all_COMP | `68+100=168` | `[+19]` (wrong) | `[1\|5\|8]^` | **168** ✓ |
+
+The phenomenon needs a mechanistic explanation. SP6's transition-function probe asks the question directly: at the moment just before the model emits its answer, what does the hidden state actually encode?
+
+### Setup
+
+We forward-passed the full gold trace (operands + interactive simulator steps + final state response + `=` + answer) through two converged models — `sp1_small_all` (opaque, 100% in-distribution) and `sp2a_small_all_comp` (compositional, 99.99%) — and extracted hidden states at the `pre_eq` position: the last token before `=`, which is the closing `]` of the simulator's final state response. By this point the model has been told the answer in `[H|T|U]` form and is about to emit it. Linear probes (200-epoch Adam, single linear layer per target) tested whether the hidden state encodes:
+
+- The answer's digits: `final_H`, `final_T`, `final_U` (10-class classification)
+- The integer sum: `sum_value` (regression)
+- The operands: `A_value`, `B_value` (regression)
+- A carry signal: `carry_outer` (binary classification)
+
+Probes were trained on 60% of 2000 trace examples (500 facts × 4 notation pairs); evaluated on the remaining 40%.
+
+### Results — pre-eq position, last layer (L3)
+
+| Target | SP1 opaque | SP2a COMP | Chance |
+|---|---:|---:|---:|
+| `final_H` (hundreds digit) | **99.0%** | 94.1% | 10% |
+| `final_T` (tens digit)     | 28.3%     | **58.0%** | 10% |
+| `final_U` (units digit)    | 14.3%     | 19.1%     | 10% |
+| `sum_value` (R²)           | −2.17     | −1.57     | 0 |
+| `A_value` (R²)             | −0.38     | −0.14     | 0 |
+| `B_value` (R²)             | −0.23     | −0.04     | 0 |
+| `carry_outer`              | 76.7%     | 74.8%     | 50% |
+
+### Three findings worth pulling out
+
+**(1) The hundreds digit is near-perfectly encoded; the units digit is essentially not encoded.** Across both models, `final_H` is decodable at near-ceiling accuracy from the hidden state at `pre_eq`, but `final_U` is at chance — even though the simulator's response `[0|8|2]` has the units digit `2` literally as a token in the immediately-prior context. The hidden state has selectively preserved the high-place information (which determines whether the answer crosses 100, where the next token after `=` will be) but has not preserved the units digit at all. Only the *first* answer digit needs to be encoded at this position — the next-token-prediction objective doesn't require encoding U here, and the model doesn't.
+
+**(2) The autoregressive emission explains the dissociation directly.** At `pre_eq`, the hidden state encodes only `final_H` strongly (and `final_T` weakly). To emit the full answer, the model proceeds autoregressively after `=` — predicting the next digit at each step. To get the units digit, it must *attend back* to the simulator's state response (`[0|8|2]`). When that attention is right, the model gets the answer right; when it isn't (or when the attention conflates digits across positions), the dissociation appears as outputs like `40+40 → 8000` (units position attended to the trace's H or some other token) or `8+1 → 99` (units position duplicated the tens). **The dissociation is a property of the autoregressive emission, not of the trained representation. The model didn't fail to learn the answer; it failed to retrieve the right digit at the right position.**
+
+**(3) Compositional tokenization preserves the tens digit twice as well as opaque.** `final_T` decodability is 28% in opaque vs **58% in COMP** — a much larger gap than expected. A plausible reading: in opaque tokenization the rod indicator is a categorical letter (`u`/`t`) that the model treats as an unstructured switch, while in compositional the rod indicator is itself a digit (`0`/`1`/`2`) which lives in the same space as digit values. The model may end up with a more uniform place-value subspace in compositional that preserves tens-digit information further into its hidden state. This is consistent with the SP2a capacity-floor finding that compositional behaves like a mild regularizer.
+
+### What this implies
+
+The SP1 dissociation cases aren't evidence of an under-trained or confused model. They're evidence of a clean autoregressive structure where:
+- Encoding `H` at `pre_eq` is necessary (it's the next emitted digit when sum ≥ 100), so the model preserves it perfectly.
+- Encoding `T` and `U` at `pre_eq` is *not* necessary for next-token prediction (those digits are emitted later, with later positions doing the work), so the model preserves them only as much as the residual stream incidentally carries.
+- Errors creep in when the model's later attention to the simulator's state response misfires — picking the wrong digit for the position it's emitting.
+
+The architectural fix would be to push the model toward encoding the *full answer* at `pre_eq`. One concrete intervention that should help: training with a loss that reads the answer from `pre_eq` directly (e.g., a small auxiliary head predicting `sum_value` at `pre_eq`). The model would then have a gradient pressure to internalize the answer at that position. We didn't do this; we report the diagnostic finding as-is.
+
+For the historical thesis, this is a delicate result. The probing evidence (Phase 8) showed that scaffold-trained models develop place-value representations internally for Roman inputs — we read this as the abacus's positional structure being rediscovered. The SP6 probing evidence sharpens this: tool-use models develop an *answer-position-shaped* place-value representation. The hundreds digit (= the first emitted digit when it's nonzero) is over-represented; the units digit (= the last emitted digit, and only relevant later in the autoregressive sequence) is under-represented. This is what an autoregressive model with a fixed token order would do — and it's not what an abacus does. The medieval merchant who internalized the abacus would have all three digits available in working memory simultaneously, ready to be read off in any order. The transformer doesn't have working memory; it has next-token prediction. The internalization that emerges is shaped by that constraint.
+
+---
+
 ## The Analogy Completed
 
 The historical transition from Roman numerals + abacus to Hindu-Arabic positional notation was not a change in what addition *means*. The algorithm was already there, embodied in the abacus: load the operand, add digit by digit, carry when a column overflows, read the result. Hindu-Arabic notation internalized the abacus's positional structure into the writing system itself — making the *notation* do what the *tool* used to do.
