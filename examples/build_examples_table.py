@@ -141,14 +141,41 @@ def cell_glyph(row):
 
 
 def render_anchor_matrix(conditions, anchors):
-    """Per-anchor result matrix across all conditions × notation pairs."""
+    """Per-anchor result matrix across all conditions × notation pairs.
+
+    If no anchor problem appears in any condition's JSONL (the test set
+    doesn't overlap the anchor set — common for OOD evals), the section is
+    suppressed entirely with a one-line note.
+    """
+    indexed = [(label, index_by_problem(rows)) for label, rows in conditions]
+
+    # First pass: are any anchors actually present anywhere?
+    any_present = False
+    for a in anchors['anchors']:
+        A, B = a['A'], a['B']
+        for _label, idx in indexed:
+            for (nA, nB) in NOTATION_PAIRS:
+                if (A, B, nA, nB) in idx:
+                    any_present = True
+                    break
+            if any_present:
+                break
+        if any_present:
+            break
+
+    if not any_present:
+        return ['## Anchor problems', '',
+                "_(Anchor set does not overlap this test set — section suppressed. "
+                "Anchors are scoped to the standard test distribution; OOD evals "
+                "should add their own anchor set if longitudinal comparison is desired.)_",
+                '']
+
     lines = ['## Anchor problems', '',
              "Each row is one anchor; each cell shows model status across the 4 "
              "notation pairs (hindu+hindu, hindu+roman, roman+hindu, roman+roman). "
              "✓ = correct final answer; ✗ = wrong; ? = anchor not present in JSONL.",
              '']
 
-    # Build header: ID | A+B=C | Cat | <cond1 hh hr rh rr> | <cond2 hh hr rh rr>
     cond_labels = [label for label, _ in conditions]
     header_top = '| Anchor | A+B=C | Category |'
     header_sep = '|---|---|---|'
@@ -157,9 +184,6 @@ def render_anchor_matrix(conditions, anchors):
         header_sep += '---|'
     lines.append(header_top)
     lines.append(header_sep)
-
-    # Index each condition by problem key
-    indexed = [(label, index_by_problem(rows)) for label, rows in conditions]
 
     for a in anchors['anchors']:
         A, B, C = a['A'], a['B'], a['C']

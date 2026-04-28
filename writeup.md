@@ -740,6 +740,75 @@ The headline finding is the one that matters: **compositional tokenization match
 
 ---
 
+## Phase 11: Rod-Index Generalization Fails (SP2b)
+
+The structural promise of compositional tokenization (Phase 10) is that the rod index is a digit, not a categorical token — so extending the model from rods {0, 1} to rod 2 should be a digit-generalization problem rather than an out-of-vocabulary problem. We tested this directly: present the SP2(a) compositional checkpoints with operands they were never trained on — `(A, B)` pairs where `B ∈ [100, 999]`, so each gold trajectory requires a `+2d` rod-2 command. The OOD test set was 500 such pairs, generated with `A + B ≤ 999` so the 3-rod simulator wouldn't overflow.
+
+### Result: zero rod-2 commands emitted, across all conditions
+
+| Condition | OOD overall | Avg cmds/prob | Rod-2 commands emitted | Status (top) |
+|---|---:|---:|---:|---|
+| tiny + all   + COMP | 0.05% (1/2000) | 1.79 | 0 | wrong_command_count: 1821 |
+| tiny + hindu + COMP | 0.0%           | 0.81 | 0 | wrong_command_count: 878  |
+| **small + all + COMP** | **0.0%**   | **1.77** | **0** | **wrong_command_count: 1915** |
+| small + hindu + COMP | 0.0%           | 1.00 | 0 | wrong_command_count: 1546 |
+
+Across **all 2000 OOD problems × all four trained models**, the small+all+COMP model emitted exactly **zero `+2d` rod-2 commands**. It issued only rod-0 (1530 commands) and rod-1 (2003 commands) — the same rod indices it had seen during training. The average commands-per-problem was 1.77, almost identical to the training distribution average of 1.81. The model faithfully reproduced its trained command-count distribution and stopped.
+
+### What the model does instead
+
+A clean canonical example. For `82+214=296`, the gold trajectory requires three commands `[+04, +11, +22]` — units digit, tens digit, hundreds digit of B. The small+all+COMP model emits:
+
+```
+82+214=296 (h+h):  cmds=[+04, +13]   gold=[+04, +11, +22]   predicted=117
+82+214=296 (h+r):  cmds=[+05, +15]   gold=[+04, +11, +22]   predicted=117
+82+214=296 (r+h):  cmds=[+05, +13]   gold=[+04, +11, +22]   predicted=117
+82+214=296 (r+r):  cmds=[+05, +15]   gold=[+04, +11, +22]   predicted=117
+```
+
+The model issues two rod-{0, 1} commands and stops, never reaching rod 2. The digits it picks for those two commands aren't even consistent across notation pairs, suggesting the model is doing something between "first two B digits" and "last two B digits" depending on how it parses the (1- or 3-digit-Roman) operand B. It then guesses an answer ("117" in this case) that is unrelated to the simulator's final state.
+
+### The 1 "correct" case is a state-answer dissociation
+
+The single tiny+all+COMP correct case is the most informative single example in this phase:
+
+```
+68+100=168 (h+r):  cmds=[+19]   gold=[+21]   final_state=[1|5|8]^   predicted=168
+```
+
+The model issues one command — `+19` (add 9 to the tens rod). The gold trajectory needs `+21` (add 1 to the hundreds rod). Starting from `[0|6|8]` (A=68 loaded), `+19` yields `6+9=15` for the tens, units stay 8, carry 1 to hundreds. Final state: `[1|5|8]^` — the abacus shows 158, not 168. **The model then emits "168" — the correct answer — despite the abacus being in the wrong state.** Right answer, wrong path, ungrounded answer head.
+
+This is the SP1 answer-head-dissociation pattern (`40+40=80 → predicted=8000`; `8+1=9 → predicted=99` from SP2a's single failure) appearing again in OOD. The pattern is now a robust phenomenon worth a focused investigation: across SP1's full failure gallery, SP2a's single failure, and SP2b's only "success," the model sometimes produces the correct answer regardless of the simulator's state — and sometimes produces the wrong answer despite a correct simulator state. The answer head is doing something other than reading the rod register.
+
+### What this tells us about the project's framing
+
+The compositional tokenization argument was: rod_idx is a digit; train on {0, 1}, test on {2}, the model has seen "2" in countless other contexts, so emitting `+2d` should be a small generalization. **It isn't. Or rather, it isn't *only* a small generalization** — there are several other things being generalized simultaneously:
+
+1. The number of commands per problem (training distribution: ~1.8; OOD requires: ~3)
+2. The mapping from B's digit positions to rod indices (training: B has at most 2 nonzero digits at positions {0, 1}; OOD: B has up to 3 at {0, 1, 2})
+3. The format of B in the prompt (training: 1- or 2-digit; OOD: 3-digit)
+
+Even with all three generalizations available structurally, the model commits hardest to the *first* — the command-count distribution. It learned "issue ~2 commands" as a behavioral regularity, not "issue one command per nonzero digit of B as decomposed by position."
+
+This is consistent with the Phase 6 digit-scaffold finding: transformers learn fixed-depth procedures, not variable-length algorithms. Compositional tokenization makes the OOD command *expressible*, but the model's depth-stopping behavior is downstream of the tokenization choice. The structural property of the tokens isn't sufficient to override the count regularity learned from training.
+
+### What might unlock rod-index generalization
+
+Three plausible interventions, in increasing scope:
+
+1. **Mixed-length training**: include problems where B has a hundreds digit during training (along with 1- and 2-digit B). Force the model to see {1, 2, 3}-command sequences at train time. This is the digit-scaffold finding's own remedy from Phase 6 (training on 1–4 digit numbers for variable carry depth) applied to the tool-use setting. Almost certainly this works — but it isn't a generalization test anymore; it's a scope expansion.
+2. **Explicit step-count signal in the format**: prefix the trace with a step count, e.g., `82+214 : 3steps : ...`. Gives the model a loop counter to attend to.
+3. **Architectural change**: a model with genuine iteration (LSTM, Universal Transformer, or external memory). The transformer's fixed-depth pattern matching is the underlying limitation; a tokenization redesign within the same architecture can't escape it.
+
+For the project's narrative, the SP2 result is informative either way:
+
+- **If we report only Phase 10 (SP2a):** the headline is "compositional tokenization works." Misleadingly clean.
+- **Reporting both:** the headline is "compositional tokenization is the right structural choice for tool grammar — but isn't sufficient for variable-depth generalization, because the depth limit is in the architecture, not the tokenization." That's the more honest and more interesting finding.
+
+This also tightens what SP4 (multiplication via toolkit dispatch) needs to test. Multi-digit multiplication has the same variable-depth structure: 47 × 23 needs different command sequences than 47 × 2. The lesson from SP2b is that we should expect the model to commit to a fixed-depth pattern unless trained on mixed depths — and we should design the SP4 training distribution accordingly.
+
+---
+
 ## The Analogy Completed
 
 The historical transition from Roman numerals + abacus to Hindu-Arabic positional notation was not a change in what addition *means*. The algorithm was already there, embodied in the abacus: load the operand, add digit by digit, carry when a column overflows, read the result. Hindu-Arabic notation internalized the abacus's positional structure into the writing system itself — making the *notation* do what the *tool* used to do.
