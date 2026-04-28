@@ -39,16 +39,20 @@ from data_abacus import (
 from model import build_model, get_device, count_params, load_state_dict_compat
 from simulator import AbacusSimulator
 
+_VARIANT_TO_MODE = {'A': 'opaque', 'COMP': 'compositional'}
+
 
 @torch.no_grad()
-def evaluate_interactive(model, test_facts, device, max_len):
+def evaluate_interactive(model, test_facts, device, max_len, variant='A'):
     """
     Evaluate model with interactive simulator on test set.
+
+    variant 'A' = opaque commands (+u5, +t3); 'COMP' = compositional (+05, +13).
 
     Returns detailed results per example.
     """
     model.eval()
-    sim = AbacusSimulator()
+    sim = AbacusSimulator(mode=_VARIANT_TO_MODE[variant])
     results = []
 
     notation_pairs = [(rA, rB) for rA in (False, True) for rB in (False, True)]
@@ -273,6 +277,8 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument('--ckpt',       required=True)
     p.add_argument('--model_size', choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
+    p.add_argument('--variant',    choices=['A', 'COMP'], default='A',
+                   help="Tool-use command variant — must match training: 'A' (opaque) or 'COMP' (compositional)")
     p.add_argument('--max_len',    type=int, default=80)
     p.add_argument('--seed',       type=int, default=42)
     p.add_argument('--jsonl_out',  default=None,
@@ -297,7 +303,8 @@ def main():
     print(f"Device: {device}")
 
     test_facts = get_test_facts()
-    results = evaluate_interactive(model, test_facts, device, args.max_len)
+    results = evaluate_interactive(model, test_facts, device, args.max_len,
+                                   variant=args.variant)
     print_results(results)
 
     if not args.no_jsonl:

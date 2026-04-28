@@ -59,6 +59,9 @@ from simulator import AbacusSimulator
 
 # ── Tool-use sequence construction ───────────────────────────────────────────
 
+_VARIANT_TO_MODE = {'A': 'opaque', 'COMP': 'compositional'}
+
+
 def make_tooluse_expression(A, B, variant='A', roman_A=False, roman_B=False):
     """
     Build a tool-use training expression.
@@ -66,9 +69,15 @@ def make_tooluse_expression(A, B, variant='A', roman_A=False, roman_B=False):
     Unlike abacus SFT (which uses trace_A etc.), this constructs the sequence
     using the simulator, matching how inference will work.
 
-    Format: '<A> + <B> : [init] +u<n> [state]^ +t<n> [state] = <C>'
+    variant 'A'    — opaque commands: '+u5', '+t3'  (SP1)
+    variant 'COMP' — compositional:   '+05', '+13'  (SP2)
+
+    Format (variant A):    '<A> + <B> : [init] +u<n> [state]^ +t<n> [state] = <C>'
+    Format (variant COMP): '<A> + <B> : [init] +0<n> [state]^ +1<n> [state] = <C>'
     """
-    sim = AbacusSimulator()
+    if variant not in _VARIANT_TO_MODE:
+        raise ValueError(f"Unknown tool-use variant {variant!r}; expected one of {list(_VARIANT_TO_MODE)}")
+    sim = AbacusSimulator(mode=_VARIANT_TO_MODE[variant])
     traj = sim.gold_trajectory(A, B)
     C = A + B
 
@@ -231,8 +240,8 @@ class ToolUseDataset(torch.utils.data.Dataset):
 
 def train_sft(model, args, device):
     """Supervised fine-tuning on gold tool-use trajectories."""
-    dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len,
-                             notation=args.notation)
+    dataset = ToolUseDataset(split='train', variant=args.variant,
+                             max_len=args.max_len, notation=args.notation)
     loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True,
                         drop_last=True)
 
@@ -323,7 +332,7 @@ def generate_with_simulator(model, A, B, device, max_len, variant='A',
         log_probs: log probs for model-generated tokens only
         reward: 1.0 if correct, 0.0 otherwise
     """
-    sim = AbacusSimulator()
+    sim = AbacusSimulator(mode=_VARIANT_TO_MODE[variant])
     C = A + B
 
     # Build prompt
@@ -432,8 +441,8 @@ def train_rl(model, args, device):
         p.requires_grad = False
 
     # SFT data for mixing (stabilization)
-    sft_dataset = ToolUseDataset(split='train', variant='A', max_len=args.max_len,
-                                 notation=args.notation)
+    sft_dataset = ToolUseDataset(split='train', variant=args.variant,
+                                 max_len=args.max_len, notation=args.notation)
     sft_loader = DataLoader(sft_dataset, batch_size=args.batch_size, shuffle=True,
                             drop_last=True)
     sft_iter = iter(sft_loader)
@@ -467,6 +476,7 @@ def train_rl(model, args, device):
             rB = random.choice([True, False])
             _, log_probs, reward, _ = generate_with_simulator(
                 model, A, B, device, args.max_len,
+                variant=args.variant,
                 roman_A=rA, roman_B=rB,
                 temperature=args.temperature,
             )
@@ -552,6 +562,8 @@ def parse_args():
     p.add_argument('--model_size',   choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
     p.add_argument('--notation',     choices=['all', 'hindu', 'roman'], default='all',
                    help="Training notation filter: 'all' = all 4 (rA,rB) combos, 'hindu' = Hindu-only, 'roman' = Roman-only")
+    p.add_argument('--variant',      choices=['A', 'COMP'], default='A',
+                   help="Tool-use command variant: 'A' = opaque (+u5,+t3; SP1) or 'COMP' = compositional (+05,+13; SP2)")
     p.add_argument('--max_len',      type=int, default=80)
     p.add_argument('--batch_size',   type=int, default=64)
     p.add_argument('--lr',           type=float, default=3e-4)
