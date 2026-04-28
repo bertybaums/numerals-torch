@@ -42,6 +42,36 @@ from simulator import AbacusSimulator
 _VARIANT_TO_MODE = {'A': 'opaque', 'COMP': 'compositional'}
 
 
+def make_ood_rod2_facts(n_samples=500, A_min=1, A_max=99,
+                        B_min=100, B_max=999, sum_max=999, seed=42):
+    """
+    Generate an out-of-distribution test set whose B operands have a
+    hundreds digit (B ≥ 100). Used by SP2(b) to probe whether a model
+    trained on rod-{0,1} commands (`+0d`, `+1d`) generalizes to emitting
+    rod-2 commands (`+2d`) when B's hundreds digit is nonzero.
+
+    All sums are kept ≤ sum_max (default 999) so the 3-rod simulator
+    doesn't overflow — that way "wrong final answer" cleanly indicates
+    failed generalization rather than simulator wrap-around.
+    """
+    rng = random.Random(seed)
+    facts = []
+    seen = set()
+    # Cap attempts to avoid pathological seeds.
+    for _ in range(20 * n_samples):
+        if len(facts) >= n_samples:
+            break
+        A = rng.randint(A_min, A_max)
+        B = rng.randint(B_min, B_max)
+        if A + B > sum_max:
+            continue
+        if (A, B) in seen:
+            continue
+        seen.add((A, B))
+        facts.append((A, B))
+    return facts
+
+
 @torch.no_grad()
 def evaluate_interactive(model, test_facts, device, max_len, variant='A'):
     """
@@ -49,7 +79,9 @@ def evaluate_interactive(model, test_facts, device, max_len, variant='A'):
 
     variant 'A' = opaque commands (+u5, +t3); 'COMP' = compositional (+05, +13).
 
-    Returns detailed results per example.
+    Returns detailed results per example. Skips facts whose gold trajectory
+    can't be constructed in the active variant (e.g., opaque mode rejects
+    B ≥ 100 because there's no '+h' opaque token).
     """
     model.eval()
     sim = AbacusSimulator(mode=_VARIANT_TO_MODE[variant])
@@ -58,10 +90,11 @@ def evaluate_interactive(model, test_facts, device, max_len, variant='A'):
     notation_pairs = [(rA, rB) for rA in (False, True) for rB in (False, True)]
 
     for (A, B) in test_facts:
-        if B > 99:
-            continue  # can't decompose into single-digit +u/+t commands
+        try:
+            gold_traj = sim.gold_trajectory(A, B)
+        except ValueError:
+            continue  # operand out of range for this variant/n_rods
         C = A + B
-        gold_traj = sim.gold_trajectory(A, B)
         gold_cmds = [s['command'] for s in gold_traj if s['command'] is not None]
 
         for (rA, rB) in notation_pairs:
@@ -279,6 +312,11 @@ def parse_args():
     p.add_argument('--model_size', choices=['tiny', 'small', 'large', 'medium', 'xlarge'], default='medium')
     p.add_argument('--variant',    choices=['A', 'COMP'], default='A',
                    help="Tool-use command variant — must match training: 'A' (opaque) or 'COMP' (compositional)")
+    p.add_argument('--test_set',   choices=['standard', 'ood_rod2'], default='standard',
+                   help="Which test set: 'standard' = held-out 1-100 facts (default); 'ood_rod2' = "
+                        "B in [100,999] OOD probe for SP2(b) rod-index generalization")
+    p.add_argument('--ood_n',      type=int, default=500,
+                   help="Number of OOD problems to sample when --test_set=ood_rod2")
     p.add_argument('--max_len',    type=int, default=80)
     p.add_argument('--seed',       type=int, default=42)
     p.add_argument('--jsonl_out',  default=None,
@@ -302,13 +340,29 @@ def main():
     print(f"Model: {args.model_size} ({count_params(model):,} params)")
     print(f"Device: {device}")
 
-    test_facts = get_test_facts()
+    if args.test_set == 'standard':
+        test_facts = get_test_facts()
+        suffix = ''
+    elif args.test_set == 'ood_rod2':
+        test_facts = make_ood_rod2_facts(n_samples=args.ood_n, seed=args.seed)
+        suffix = '_ood_rod2'
+        print(f"OOD test set: {len(test_facts)} (A,B) pairs with B in [100,999], A+B ≤ 999")
+    else:
+        raise ValueError(f"Unknown --test_set {args.test_set!r}")
+
     results = evaluate_interactive(model, test_facts, device, args.max_len,
                                    variant=args.variant)
     print_results(results)
 
     if not args.no_jsonl:
-        jsonl_path = args.jsonl_out or default_jsonl_path(args.ckpt)
+        if args.jsonl_out:
+            jsonl_path = args.jsonl_out
+        else:
+            jsonl_path = default_jsonl_path(args.ckpt)
+            if suffix:
+                # Don't overwrite a standard-eval JSONL with an OOD one.
+                root, ext = os.path.splitext(jsonl_path)
+                jsonl_path = root + suffix + ext
         write_jsonl(results, jsonl_path)
 
 
